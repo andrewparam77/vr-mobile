@@ -1,5 +1,5 @@
-name: hand_ar
-description: AR hand tracking overlay
+name: hand_vr
+description: AR hand tracking overlay for Android
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -10,9 +10,8 @@ dependencies:
   flutter:
     sdk: flutter
   camera: ^0.10.5
-  google_mlkit_hand_detection: ^0.1.0
+  hand_landmarker: ^3.1.0
   permission_handler: ^11.0.1
-  path_provider: ^2.1.1
 
 flutter:
   uses-material-design: true
