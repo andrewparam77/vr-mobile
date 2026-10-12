@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -16,9 +17,21 @@ const List<List<int>> handConnections = [
   [0, 17],
 ];
 
+// ========== Класс частицы паутины ==========
+class WebParticle {
+  Offset position;
+  Offset velocity;
+  double life; // 1.0 → 0.0
+
+  WebParticle({
+    required this.position,
+    required this.velocity,
+    this.life = 1.0,
+  });
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Принудительно горизонтальная ориентация
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.landscapeLeft,
     DeviceOrientation.landscapeRight,
@@ -46,7 +59,9 @@ class _HandARScreenState extends State<HandARScreen> {
   HandLandmarkerPlugin? _plugin;
   List<Hand> _hands = [];
   bool _isInitialized = false;
-  bool _isDetecting = false; // Защита от перегрузки кадров
+
+  // Список частиц живёт в State, чтобы сохраняться между кадрами
+  final List<WebParticle> _webParticles = [];
 
   @override
   void initState() {
@@ -55,7 +70,7 @@ class _HandARScreenState extends State<HandARScreen> {
   }
 
   Future<void> _initialize() async {
-    // Ищем ЗАДНЮЮ камеру
+    // Задняя камера
     final camera = cameras.firstWhere(
       (cam) => cam.lensDirection == CameraLensDirection.back,
       orElse: () => cameras.first,
@@ -70,7 +85,7 @@ class _HandARScreenState extends State<HandARScreen> {
 
     _plugin = HandLandmarkerPlugin.create(
       numHands: 2,
-      minHandDetectionConfidence: 0.5, // Снижено для лучшего распознавания
+      minHandDetectionConfidence: 0.6,
       delegate: HandLandmarkerDelegate.gpu,
     );
 
@@ -91,13 +106,8 @@ class _HandARScreenState extends State<HandARScreen> {
   }
 
   void _processCameraImage(CameraImage image) {
-    if (_isDetecting) return;
-    _isDetecting = true;
-    
-    // ВАЖНО: передаём sensorOrientation, иначе руки не распознаются
+    // Ключевой момент: передаём sensorOrientation, иначе руки не находятся
     _plugin?.processFrame(image, _controller!.description.sensorOrientation);
-    
-    _isDetecting = false;
   }
 
   @override
@@ -109,7 +119,6 @@ class _HandARScreenState extends State<HandARScreen> {
       );
     }
 
-    // Вычисляем угол поворота по формуле из документации
     final sensorOrientation = _controller!.description.sensorOrientation;
     final quarterTurns = (sensorOrientation ~/ 90) % 4;
 
@@ -118,7 +127,6 @@ class _HandARScreenState extends State<HandARScreen> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // RotatedBox с правильным quarterTurns для горизонтальной ориентации
           RotatedBox(
             quarterTurns: quarterTurns,
             child: CameraPreview(_controller!),
@@ -132,6 +140,7 @@ class _HandARScreenState extends State<HandARScreen> {
               ),
               isFrontCamera: false,
               quarterTurns: quarterTurns,
+              webParticles: _webParticles,
             ),
           ),
         ],
@@ -152,13 +161,43 @@ class _HandSkeletonPainter extends CustomPainter {
   final Size imageSize;
   final bool isFrontCamera;
   final int quarterTurns;
+  final List<WebParticle> webParticles;
 
   _HandSkeletonPainter({
     required this.hands,
     required this.imageSize,
     required this.isFrontCamera,
     required this.quarterTurns,
+    required this.webParticles,
   });
+
+  // ========== Определение жеста «человек-паук» ==========
+  // Средний и безымянный согнуты, указательный и мизинец выпрямлены
+  bool _isSpiderManGesture(List<Landmark> lm) {
+    const indexTip = 8, indexPip = 6;
+    const middleTip = 12, middlePip = 10;
+    const ringTip = 16, ringPip = 14;
+    const pinkyTip = 20, pinkyPip = 18;
+
+    final middleCurled = lm[middleTip].y > lm[middlePip].y;
+    final ringCurled = lm[ringTip].y > lm[ringPip].y;
+    final indexExtended = lm[indexTip].y < lm[indexPip].y;
+    final pinkyExtended = lm[pinkyTip].y < lm[pinkyPip].y;
+
+    return middleCurled && ringCurled && indexExtended && pinkyExtended;
+  }
+
+  // ========== Создание частиц паутины ==========
+  void _spawnWebParticles(Offset origin) {
+    for (int i = 0; i < 15; i++) {
+      final angle = (i / 15.0) * 2 * math.pi;
+      webParticles.add(WebParticle(
+        position: origin,
+        velocity: Offset(math.cos(angle) * 8, math.sin(angle) * 8),
+        life: 1.0,
+      ));
+    }
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -168,14 +207,13 @@ class _HandSkeletonPainter extends CustomPainter {
     Offset map(Offset p) {
       var x = p.dx * scaleX;
       var y = p.dy * scaleY;
-      
-      // Корректировка координат с учётом поворота
+
       if (quarterTurns == 1) {
         return Offset(y, size.width - x);
       } else if (quarterTurns == 3) {
         return Offset(size.height - y, x);
       }
-      
+
       if (isFrontCamera) x = size.width - x;
       return Offset(x, y);
     }
@@ -190,13 +228,20 @@ class _HandSkeletonPainter extends CustomPainter {
       ..color = Colors.white
       ..style = PaintingStyle.fill;
 
+    // ===== Рисуем скелет и проверяем жест =====
     for (final hand in hands) {
       final pts = hand.landmarks
           .map((lm) => map(Offset(lm.x, lm.y)))
           .toList();
 
-      if (pts.length < 21) continue; // Проверка на корректность данных
+      if (pts.length < 21) continue;
 
+      // Жест «человек-паук» → из запястья летит паутина
+      if (_isSpiderManGesture(hand.landmarks)) {
+        _spawnWebParticles(pts[0]); // pts[0] — запястье
+      }
+
+      // Белая маска ладони
       final palmPath = Path()
         ..moveTo(pts[0].dx, pts[0].dy)
         ..lineTo(pts[5].dx, pts[5].dy)
@@ -207,21 +252,43 @@ class _HandSkeletonPainter extends CustomPainter {
       canvas.drawPath(
         palmPath,
         Paint()
-          ..color = Colors.white.withOpacity(0.35)
+          ..color = Colors.white.withValues(alpha: 0.35)
           ..style = PaintingStyle.fill,
       );
 
+      // Линии скелета
       for (final c in handConnections) {
         canvas.drawLine(pts[c[0]], pts[c[1]], bonePaint);
       }
 
+      // Точки-суставы
       for (final p in pts) {
         canvas.drawCircle(p, 8, jointPaint);
       }
+    }
+
+    // ===== Обновляем и рисуем частицы паутины =====
+    webParticles.removeWhere((p) => p.life <= 0);
+    for (final p in webParticles) {
+      p.position += p.velocity;
+      p.velocity *= 0.95; // замедление
+      p.life -= 0.03;     // затухание
+    }
+
+    for (final p in webParticles) {
+      final alpha = (p.life * 255).clamp(0, 255).toInt();
+      canvas.drawCircle(
+        p.position,
+        6,
+        Paint()..color = Colors.white.withValues(alpha: alpha / 255),
+      );
     }
   }
 
   @override
   bool shouldRepaint(covariant _HandSkeletonPainter old) =>
-      old.hands != hands || old.imageSize != imageSize || old.quarterTurns != quarterTurns;
+      old.hands != hands ||
+      old.imageSize != imageSize ||
+      old.quarterTurns != quarterTurns ||
+      old.webParticles.length != webParticles.length;
 }
