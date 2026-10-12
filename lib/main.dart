@@ -46,6 +46,7 @@ class _HandARScreenState extends State<HandARScreen> {
   HandLandmarkerPlugin? _plugin;
   List<Hand> _hands = [];
   bool _isInitialized = false;
+  bool _isDetecting = false; // Защита от перегрузки кадров
 
   @override
   void initState() {
@@ -69,9 +70,7 @@ class _HandARScreenState extends State<HandARScreen> {
 
     _plugin = HandLandmarkerPlugin.create(
       numHands: 2,
-      minHandDetectionConfidence: 0.6,
-      minHandPresenceConfidence: 0.6,
-      minTrackingConfidence: 0.6,
+      minHandDetectionConfidence: 0.5, // Снижено для лучшего распознавания
       delegate: HandLandmarkerDelegate.gpu,
     );
 
@@ -92,7 +91,13 @@ class _HandARScreenState extends State<HandARScreen> {
   }
 
   void _processCameraImage(CameraImage image) {
+    if (_isDetecting) return;
+    _isDetecting = true;
+    
+    // ВАЖНО: передаём sensorOrientation, иначе руки не распознаются
     _plugin?.processFrame(image, _controller!.description.sensorOrientation);
+    
+    _isDetecting = false;
   }
 
   @override
@@ -104,14 +109,18 @@ class _HandARScreenState extends State<HandARScreen> {
       );
     }
 
+    // Вычисляем угол поворота по формуле из документации
+    final sensorOrientation = _controller!.description.sensorOrientation;
+    final quarterTurns = (sensorOrientation ~/ 90) % 4;
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // RotatedBox для горизонтального превью
+          // RotatedBox с правильным quarterTurns для горизонтальной ориентации
           RotatedBox(
-            quarterTurns: 1,
+            quarterTurns: quarterTurns,
             child: CameraPreview(_controller!),
           ),
           CustomPaint(
@@ -122,6 +131,7 @@ class _HandARScreenState extends State<HandARScreen> {
                 _controller!.value.previewSize!.width,
               ),
               isFrontCamera: false,
+              quarterTurns: quarterTurns,
             ),
           ),
         ],
@@ -141,11 +151,13 @@ class _HandSkeletonPainter extends CustomPainter {
   final List<Hand> hands;
   final Size imageSize;
   final bool isFrontCamera;
+  final int quarterTurns;
 
   _HandSkeletonPainter({
     required this.hands,
     required this.imageSize,
     required this.isFrontCamera,
+    required this.quarterTurns,
   });
 
   @override
@@ -155,8 +167,17 @@ class _HandSkeletonPainter extends CustomPainter {
 
     Offset map(Offset p) {
       var x = p.dx * scaleX;
+      var y = p.dy * scaleY;
+      
+      // Корректировка координат с учётом поворота
+      if (quarterTurns == 1) {
+        return Offset(y, size.width - x);
+      } else if (quarterTurns == 3) {
+        return Offset(size.height - y, x);
+      }
+      
       if (isFrontCamera) x = size.width - x;
-      return Offset(x, p.dy * scaleY);
+      return Offset(x, y);
     }
 
     final bonePaint = Paint()
@@ -173,6 +194,8 @@ class _HandSkeletonPainter extends CustomPainter {
       final pts = hand.landmarks
           .map((lm) => map(Offset(lm.x, lm.y)))
           .toList();
+
+      if (pts.length < 21) continue; // Проверка на корректность данных
 
       final palmPath = Path()
         ..moveTo(pts[0].dx, pts[0].dy)
@@ -200,5 +223,5 @@ class _HandSkeletonPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _HandSkeletonPainter old) =>
-      old.hands != hands || old.imageSize != imageSize;
+      old.hands != hands || old.imageSize != imageSize || old.quarterTurns != quarterTurns;
 }
