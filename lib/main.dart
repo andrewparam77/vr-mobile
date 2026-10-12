@@ -1,12 +1,12 @@
 import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:hand_landmarker/hand_landmarker.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 late List<CameraDescription> cameras;
 
-// Скелет руки: вынесен в глобальную область, чтобы был виден везде
 const List<List<int>> handConnections = [
   [0, 1], [1, 2], [2, 3], [3, 4],
   [0, 5], [5, 6], [6, 7], [7, 8],
@@ -18,6 +18,11 @@ const List<List<int>> handConnections = [
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Принудительно горизонтальная ориентация
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
+  ]);
   await Permission.camera.request();
   cameras = await availableCameras();
   runApp(const MyApp());
@@ -49,8 +54,9 @@ class _HandARScreenState extends State<HandARScreen> {
   }
 
   Future<void> _initialize() async {
+    // Ищем ЗАДНЮЮ камеру
     final camera = cameras.firstWhere(
-      (cam) => cam.lensDirection == CameraLensDirection.front,
+      (cam) => cam.lensDirection == CameraLensDirection.back,
       orElse: () => cameras.first,
     );
 
@@ -63,7 +69,9 @@ class _HandARScreenState extends State<HandARScreen> {
 
     _plugin = HandLandmarkerPlugin.create(
       numHands: 2,
-      minHandDetectionConfidence: 0.7,
+      minHandDetectionConfidence: 0.6,
+      minHandPresenceConfidence: 0.6,
+      minTrackingConfidence: 0.6,
       delegate: HandLandmarkerDelegate.gpu,
     );
 
@@ -101,7 +109,11 @@ class _HandARScreenState extends State<HandARScreen> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          CameraPreview(_controller!),
+          // RotatedBox для горизонтального превью
+          RotatedBox(
+            quarterTurns: 1,
+            child: CameraPreview(_controller!),
+          ),
           CustomPaint(
             painter: _HandSkeletonPainter(
               hands: _hands,
@@ -109,9 +121,7 @@ class _HandARScreenState extends State<HandARScreen> {
                 _controller!.value.previewSize!.height,
                 _controller!.value.previewSize!.width,
               ),
-              isFrontCamera:
-                  _controller!.description.lensDirection ==
-                      CameraLensDirection.front,
+              isFrontCamera: false,
             ),
           ),
         ],
@@ -149,11 +159,8 @@ class _HandSkeletonPainter extends CustomPainter {
       return Offset(x, p.dy * scaleY);
     }
 
-    // Один цвет для всех, потому что handedness в этой версии пакета нет
-    final baseColor = Colors.white;
-
     final bonePaint = Paint()
-      ..color = baseColor
+      ..color = Colors.white
       ..strokeWidth = 6
       ..strokeCap = StrokeCap.round
       ..style = PaintingStyle.stroke;
@@ -167,7 +174,6 @@ class _HandSkeletonPainter extends CustomPainter {
           .map((lm) => map(Offset(lm.x, lm.y)))
           .toList();
 
-      // Белая маска ладони
       final palmPath = Path()
         ..moveTo(pts[0].dx, pts[0].dy)
         ..lineTo(pts[5].dx, pts[5].dy)
@@ -182,12 +188,10 @@ class _HandSkeletonPainter extends CustomPainter {
           ..style = PaintingStyle.fill,
       );
 
-      // Кости (используем глобальный handConnections)
       for (final c in handConnections) {
         canvas.drawLine(pts[c[0]], pts[c[1]], bonePaint);
       }
 
-      // Точки-суставы
       for (final p in pts) {
         canvas.drawCircle(p, 8, jointPaint);
       }
