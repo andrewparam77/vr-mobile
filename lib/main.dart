@@ -17,17 +17,36 @@ const List<List<int>> handConnections = [
   [0, 17],
 ];
 
-// ========== Класс частицы паутины ==========
-class WebParticle {
-  Offset position;
-  Offset velocity;
-  double life; // 1.0 → 0.0
+// ========== Виртуальное окно ==========
+class VirtualWindow {
+  double x, y, z;      // позиция в виртуальном пространстве
+  double width, height;
+  String title;
+  Color color;
 
-  WebParticle({
-    required this.position,
-    required this.velocity,
-    this.life = 1.0,
+  VirtualWindow({
+    required this.x,
+    required this.y,
+    required this.z,
+    required this.width,
+    required this.height,
+    required this.title,
+    required this.color,
   });
+
+  // Масштаб от глубины: чем дальше, тем меньше
+  double get scale => 1.0 / (1.0 + z * 0.5);
+
+  double get screenWidth => width * scale;
+  double get screenHeight => height * scale;
+
+  // Попала ли точка внутрь окна
+  bool contains(Offset p) {
+    return p.dx >= x &&
+        p.dx <= x + screenWidth &&
+        p.dy >= y &&
+        p.dy <= y + screenHeight;
+  }
 }
 
 Future<void> main() async {
@@ -60,8 +79,12 @@ class _HandARScreenState extends State<HandARScreen> {
   List<Hand> _hands = [];
   bool _isInitialized = false;
 
-  // Список частиц живёт в State, чтобы сохраняться между кадрами
-  final List<WebParticle> _webParticles = [];
+  // Виртуальные окна
+  final List<VirtualWindow> _windows = [];
+
+  // Какое окно сейчас тащим
+  VirtualWindow? _draggedWindow;
+  Offset _dragOffset = Offset.zero;
 
   @override
   void initState() {
@@ -70,7 +93,6 @@ class _HandARScreenState extends State<HandARScreen> {
   }
 
   Future<void> _initialize() async {
-    // Задняя камера
     final camera = cameras.firstWhere(
       (cam) => cam.lensDirection == CameraLensDirection.back,
       orElse: () => cameras.first,
@@ -100,14 +122,82 @@ class _HandARScreenState extends State<HandARScreen> {
       }
     });
 
+    // Стартовые окна
+    _windows.addAll([
+      VirtualWindow(
+        x: 100, y: 150, z: 0.3,
+        width: 300, height: 200,
+        title: 'Монитор 1',
+        color: Colors.cyan,
+      ),
+      VirtualWindow(
+        x: 500, y: 200, z: 0.6,
+        width: 260, height: 180,
+        title: 'Монитор 2',
+        color: Colors.orange,
+      ),
+      VirtualWindow(
+        x: 800, y: 100, z: 0.1,
+        width: 220, height: 150,
+        title: 'Консоль',
+        color: Colors.greenAccent,
+      ),
+    ]);
+
     if (mounted) {
       setState(() => _isInitialized = true);
     }
   }
 
   void _processCameraImage(CameraImage image) {
-    // Ключевой момент: передаём sensorOrientation, иначе руки не находятся
     _plugin?.processFrame(image, _controller!.description.sensorOrientation);
+  }
+
+  // ========== Взаимодействие рукой ==========
+  void _handleHandInteraction(List<Hand> hands, Size canvasSize) {
+    if (hands.isEmpty) {
+      _draggedWindow = null;
+      return;
+    }
+
+    final hand = hands.first;
+    final lm = hand.landmarks;
+
+    const indexTip = 8;
+    const thumbTip = 4;
+
+    // Расстояние между большим и указательным — жест «щипок»
+    final pinchDist = (Offset(lm[thumbTip].x, lm[thumbTip].y) -
+            Offset(lm[indexTip].x, lm[indexTip].y))
+        .distance;
+    final isPinching = pinchDist < 0.05;
+
+    // Позиция кончика указательного пальца на экране
+    final fingerPos = Offset(
+      lm[indexTip].x * canvasSize.width,
+      lm[indexTip].y * canvasSize.height,
+    );
+
+    if (isPinching) {
+      if (_draggedWindow == null) {
+        // Ищем окно под пальцем (сверху вниз — последнее добавленное первым)
+        for (int i = _windows.length - 1; i >= 0; i--) {
+          final w = _windows[i];
+          if (w.contains(fingerPos)) {
+            _draggedWindow = w;
+            _dragOffset = fingerPos - Offset(w.x, w.y);
+            break;
+          }
+        }
+      } else {
+        // Тащим окно за пальцем
+        _draggedWindow!.x = fingerPos.dx - _dragOffset.dx;
+        _draggedWindow!.y = fingerPos.dy - _dragOffset.dy;
+      }
+    } else {
+      // Отпустили
+      _draggedWindow = null;
+    }
   }
 
   @override
@@ -124,26 +214,34 @@ class _HandARScreenState extends State<HandARScreen> {
 
     return Scaffold(
       backgroundColor: Colors.black,
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          RotatedBox(
-            quarterTurns: quarterTurns,
-            child: CameraPreview(_controller!),
-          ),
-          CustomPaint(
-            painter: _HandSkeletonPainter(
-              hands: _hands,
-              imageSize: Size(
-                _controller!.value.previewSize!.height,
-                _controller!.value.previewSize!.width,
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final canvasSize = Size(constraints.maxWidth, constraints.maxHeight);
+
+          _handleHandInteraction(_hands, canvasSize);
+
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              RotatedBox(
+                quarterTurns: quarterTurns,
+                child: CameraPreview(_controller!),
               ),
-              isFrontCamera: false,
-              quarterTurns: quarterTurns,
-              webParticles: _webParticles,
-            ),
-          ),
-        ],
+              CustomPaint(
+                painter: _ARSpacePainter(
+                  hands: _hands,
+                  windows: _windows,
+                  imageSize: Size(
+                    _controller!.value.previewSize!.height,
+                    _controller!.value.previewSize!.width,
+                  ),
+                  isFrontCamera: false,
+                  quarterTurns: quarterTurns,
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -156,71 +254,104 @@ class _HandARScreenState extends State<HandARScreen> {
   }
 }
 
-class _HandSkeletonPainter extends CustomPainter {
+class _ARSpacePainter extends CustomPainter {
   final List<Hand> hands;
+  final List<VirtualWindow> windows;
   final Size imageSize;
   final bool isFrontCamera;
   final int quarterTurns;
-  final List<WebParticle> webParticles;
 
-  _HandSkeletonPainter({
+  _ARSpacePainter({
     required this.hands,
+    required this.windows,
     required this.imageSize,
     required this.isFrontCamera,
     required this.quarterTurns,
-    required this.webParticles,
   });
 
-  // ========== Определение жеста «человек-паук» ==========
-  // Средний и безымянный согнуты, указательный и мизинец выпрямлены
-  bool _isSpiderManGesture(List<Landmark> lm) {
-    const indexTip = 8, indexPip = 6;
-    const middleTip = 12, middlePip = 10;
-    const ringTip = 16, ringPip = 14;
-    const pinkyTip = 20, pinkyPip = 18;
+  Offset map(Offset p, Size size) {
+    final scaleX = size.width / imageSize.width;
+    final scaleY = size.height / imageSize.height;
+    var x = p.dx * scaleX;
+    var y = p.dy * scaleY;
 
-    final middleCurled = lm[middleTip].y > lm[middlePip].y;
-    final ringCurled = lm[ringTip].y > lm[ringPip].y;
-    final indexExtended = lm[indexTip].y < lm[indexPip].y;
-    final pinkyExtended = lm[pinkyTip].y < lm[pinkyPip].y;
-
-    return middleCurled && ringCurled && indexExtended && pinkyExtended;
-  }
-
-  // ========== Создание частиц паутины ==========
-  void _spawnWebParticles(Offset origin) {
-    for (int i = 0; i < 15; i++) {
-      final angle = (i / 15.0) * 2 * math.pi;
-      webParticles.add(WebParticle(
-        position: origin,
-        velocity: Offset(math.cos(angle) * 8, math.sin(angle) * 8),
-        life: 1.0,
-      ));
+    if (quarterTurns == 1) {
+      return Offset(y, size.width - x);
+    } else if (quarterTurns == 3) {
+      return Offset(size.height - y, x);
     }
+
+    if (isFrontCamera) x = size.width - x;
+    return Offset(x, y);
   }
 
   @override
   void paint(Canvas canvas, Size size) {
-    final scaleX = size.width / imageSize.width;
-    final scaleY = size.height / imageSize.height;
+    // ===== 1. Окна =====
+    // Сортируем по Z: дальние — первыми, ближние — поверх
+    final sorted = List<VirtualWindow>.from(windows)
+      ..sort((a, b) => b.z.compareTo(a.z));
 
-    Offset map(Offset p) {
-      var x = p.dx * scaleX;
-      var y = p.dy * scaleY;
+    for (final w in sorted) {
+      final rect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(w.x, w.y, w.screenWidth, w.screenHeight),
+        const Radius.circular(12),
+      );
 
-      if (quarterTurns == 1) {
-        return Offset(y, size.width - x);
-      } else if (quarterTurns == 3) {
-        return Offset(size.height - y, x);
-      }
+      // Тень — создаёт ощущение «парения»
+      canvas.drawRRect(
+        rect.shift(const Offset(6, 8)),
+        Paint()
+          ..color = Colors.black.withValues(alpha: 0.4)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 12),
+      );
 
-      if (isFrontCamera) x = size.width - x;
-      return Offset(x, y);
+      // Полупрозрачный фон
+      canvas.drawRRect(
+        rect,
+        Paint()..color = w.color.withValues(alpha: 0.25),
+      );
+
+      // Обводка
+      canvas.drawRRect(
+        rect,
+        Paint()
+          ..color = w.color.withValues(alpha: 0.9)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2.5,
+      );
+
+      // Заголовок
+      final titlePainter = TextPainter(
+        text: TextSpan(
+          text: w.title,
+          style: TextStyle(
+            color: w.color,
+            fontSize: 16 * w.scale,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      titlePainter.paint(canvas, Offset(w.x + 12, w.y + 10));
+
+      // Полоска глубины
+      final depthBar = Rect.fromLTWH(
+        w.x + 12,
+        w.y + w.screenHeight - 16,
+        (w.screenWidth - 24) * (1.0 - w.z.clamp(0.0, 1.0)),
+        4,
+      );
+      canvas.drawRect(
+        depthBar,
+        Paint()..color = w.color.withValues(alpha: 0.7),
+      );
     }
 
+    // ===== 2. Скелет руки =====
     final bonePaint = Paint()
       ..color = Colors.white
-      ..strokeWidth = 6
+      ..strokeWidth = 5
       ..strokeCap = StrokeCap.round
       ..style = PaintingStyle.stroke;
 
@@ -228,67 +359,33 @@ class _HandSkeletonPainter extends CustomPainter {
       ..color = Colors.white
       ..style = PaintingStyle.fill;
 
-    // ===== Рисуем скелет и проверяем жест =====
     for (final hand in hands) {
       final pts = hand.landmarks
-          .map((lm) => map(Offset(lm.x, lm.y)))
+          .map((lm) => map(Offset(lm.x, lm.y), size))
           .toList();
 
       if (pts.length < 21) continue;
 
-      // Жест «человек-паук» → из запястья летит паутина
-      if (_isSpiderManGesture(hand.landmarks)) {
-        _spawnWebParticles(pts[0]); // pts[0] — запястье
-      }
-
-      // Белая маска ладони
-      final palmPath = Path()
-        ..moveTo(pts[0].dx, pts[0].dy)
-        ..lineTo(pts[5].dx, pts[5].dy)
-        ..lineTo(pts[9].dx, pts[9].dy)
-        ..lineTo(pts[13].dx, pts[13].dy)
-        ..lineTo(pts[17].dx, pts[17].dy)
-        ..close();
-      canvas.drawPath(
-        palmPath,
-        Paint()
-          ..color = Colors.white.withValues(alpha: 0.35)
-          ..style = PaintingStyle.fill,
-      );
-
-      // Линии скелета
       for (final c in handConnections) {
         canvas.drawLine(pts[c[0]], pts[c[1]], bonePaint);
       }
 
-      // Точки-суставы
       for (final p in pts) {
-        canvas.drawCircle(p, 8, jointPaint);
+        canvas.drawCircle(p, 6, jointPaint);
       }
-    }
 
-    // ===== Обновляем и рисуем частицы паутины =====
-    webParticles.removeWhere((p) => p.life <= 0);
-    for (final p in webParticles) {
-      p.position += p.velocity;
-      p.velocity *= 0.95; // замедление
-      p.life -= 0.03;     // затухание
-    }
-
-    for (final p in webParticles) {
-      final alpha = (p.life * 255).clamp(0, 255).toInt();
+      // Подсветка кончика указательного пальца
       canvas.drawCircle(
-        p.position,
-        6,
-        Paint()..color = Colors.white.withValues(alpha: alpha / 255),
+        pts[8],
+        12,
+        Paint()
+          ..color = Colors.yellowAccent.withValues(alpha: 0.6)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2,
       );
     }
   }
 
   @override
-  bool shouldRepaint(covariant _HandSkeletonPainter old) =>
-      old.hands != hands ||
-      old.imageSize != imageSize ||
-      old.quarterTurns != quarterTurns ||
-      old.webParticles.length != webParticles.length;
+  bool shouldRepaint(covariant _ARSpacePainter old) => true;
 }
