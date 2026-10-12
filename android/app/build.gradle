@@ -1,0 +1,6 @@
+android {
+    defaultConfig {
+        minSdkVersion 24   // ML Kit требует 21+, но для camera stream лучше 24
+        targetSdkVersion 34
+    }
+}
