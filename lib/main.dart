@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:google_mlkit_hand_detection/google_mlkit_hand_detection.dart';
+import 'package:hand_landmarker/hand_landmarker.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 late List<CameraDescription> cameras;
@@ -27,80 +27,13 @@ class HandARScreen extends StatefulWidget {
 }
 
 class _HandARScreenState extends State<HandARScreen> {
-  late CameraController _camera;
-  final HandDetector _detector = HandDetector(
-    options: HandDetectorOptions(
-      mode: DetectionMode.stream,
-      minHandDetectionConfidence: 0.5,
-      minTrackingConfidence: 0.5,
-      // ВАЖНО: без этого будет только 1 рука
-      // (в некоторых версиях плагина поле называется иначе)
-    ),
-  );
-
+  CameraController? _controller;
+  HandLandmarkerPlugin? _plugin;
   List<Hand> _hands = [];
-  Size _imageSize = const Size(1, 1);
-  bool _busy = false;
+  bool _isInitialized = false;
+  bool _isDetecting = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _initCamera();
-  }
-
-  Future<void> _initCamera() async {
-    final cam = cameras.firstWhere(
-      (c) => c.lensDirection == CameraLensDirection.front,
-      orElse: () => cameras.first,
-    );
-    _camera = CameraController(
-      cam,
-      ResolutionPreset.medium,
-      enableAudio: false,
-      imageFormatGroup: ImageFormatGroup.nv21,
-    );
-    await _camera.initialize();
-    _camera.startImageStream(_processFrame);
-    setState(() {});
-  }
-
-  Future<void> _processFrame(CameraImage image) async {
-    if (_busy) return;
-    _busy = true;
-    try {
-      final input = _toInputImage(image);
-      if (input != null) {
-        final hands = await _detector.processImage(input);
-        // ML Kit сам вернёт до 2 рук, если они видны
-        setState(() {
-          _hands = hands;
-          _imageSize =
-              Size(image.width.toDouble(), image.height.toDouble());
-        });
-      }
-    } catch (_) {}
-    _busy = false;
-  }
-
-  InputImage? _toInputImage(CameraImage image) {
-    final format = InputImageFormatValue.fromRawValue(image.format.raw);
-    if (format == null) return null;
-    final rotation = InputImageRotationValue.fromRawValue(
-            _camera.description.sensorOrientation) ??
-        InputImageRotation.rotation0deg;
-
-    final plane = image.planes.first;
-    return InputImage.fromBytes(
-      bytes: plane.bytes,
-      metadata: InputImageMetadata(
-        size: Size(image.width.toDouble(), image.height.toDouble()),
-        rotation: rotation,
-        format: format,
-        bytesPerRow: plane.bytesPerRow,
-      ),
-    );
-  }
-
+  // Скелет руки: какие точки соединять линиями
   static const List<List<int>> _connections = [
     [0, 1], [1, 2], [2, 3], [3, 4],
     [0, 5], [5, 6], [6, 7], [7, 8],
@@ -111,8 +44,65 @@ class _HandARScreenState extends State<HandARScreen> {
   ];
 
   @override
+  void initState() {
+    super.initState();
+    _initialize();
+  }
+
+  Future<void> _initialize() async {
+    // 1. Выбираем фронтальную камеру (или первую доступную)
+    final camera = cameras.firstWhere(
+      (cam) => cam.lensDirection == CameraLensDirection.front,
+      orElse: () => cameras.first,
+    );
+
+    _controller = CameraController(
+      camera,
+      ResolutionPreset.medium,
+      enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.yuv420,
+    );
+
+    // 2. Создаём плагин для трекинга рук
+    _plugin = HandLandmarkerPlugin.create(
+      numHands: 2,
+      minHandDetectionConfidence: 0.7,
+      delegate: HandLandmarkerDelegate.gpu,
+    );
+
+    // 3. Инициализируем камеру и запускаем поток кадров
+    await _controller!.initialize();
+    await _controller!.startImageStream(_processCameraImage);
+
+    // 4. Подписываемся на поток результатов от плагина
+    _plugin!.landmarkStream.listen((hands) {
+      if (mounted) {
+        setState(() {
+          _hands = hands;
+        });
+      }
+    });
+
+    if (mounted) {
+      setState(() {
+        _isInitialized = true;
+      });
+    }
+  }
+
+  void _processCameraImage(CameraImage image) {
+    // Защита от перегрузки: обрабатываем кадр только если предыдущий завершён
+    if (_isDetecting) return;
+    _isDetecting = true;
+
+    _plugin?.processFrame(image, _controller!.description.sensorOrientation);
+
+    _isDetecting = false;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    if (!_camera.value.isInitialized) {
+    if (!_isInitialized || _controller == null) {
       return const Scaffold(
         backgroundColor: Colors.black,
         body: Center(child: CircularProgressIndicator()),
@@ -124,31 +114,31 @@ class _HandARScreenState extends State<HandARScreen> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          CameraPreview(_camera),
+          CameraPreview(_controller!),
           CustomPaint(
             painter: _HandSkeletonPainter(
               hands: _hands,
-              imageSize: _imageSize,
+              imageSize: Size(
+                _controller!.value.previewSize!.height,
+                _controller!.value.previewSize!.width,
+              ),
               isFrontCamera:
-                  _camera.description.lensDirection ==
+                  _controller!.description.lensDirection ==
                       CameraLensDirection.front,
             ),
           ),
-          // Счётчик рук
           Positioned(
             top: 40,
             left: 20,
             child: Container(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 12, vertical: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               decoration: BoxDecoration(
                 color: Colors.black54,
                 borderRadius: BorderRadius.circular(20),
               ),
               child: Text(
                 'Рук: ${_hands.length}',
-                style: const TextStyle(
-                    color: Colors.white, fontSize: 16),
+                style: const TextStyle(color: Colors.white, fontSize: 16),
               ),
             ),
           ),
@@ -159,8 +149,8 @@ class _HandARScreenState extends State<HandARScreen> {
 
   @override
   void dispose() {
-    _camera.dispose();
-    _detector.close();
+    _controller?.dispose();
+    _plugin?.dispose();
     super.dispose();
   }
 }
@@ -176,9 +166,8 @@ class _HandSkeletonPainter extends CustomPainter {
     required this.isFrontCamera,
   });
 
-  // Разные цвета для левой и правой руки
-  static const Color _leftColor = Color(0xFF4FC3F7);  // голубой
-  static const Color _rightColor = Color(0xFFFF7043); // оранжевый
+  static const Color _leftColor = Color(0xFF4FC3F7);
+  static const Color _rightColor = Color(0xFFFF7043);
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -192,8 +181,7 @@ class _HandSkeletonPainter extends CustomPainter {
     }
 
     for (final hand in hands) {
-      // Определяем цвет по типу руки
-      final isLeft = hand.type == HandType.left;
+      final isLeft = hand.handedness == Handedness.left;
       final baseColor = isLeft ? _leftColor : _rightColor;
 
       final bonePaint = Paint()
@@ -215,7 +203,6 @@ class _HandSkeletonPainter extends CustomPainter {
           .map((lm) => map(Offset(lm.x, lm.y)))
           .toList();
 
-      // Белая маска ладони
       final palmPath = Path()
         ..moveTo(pts[0].dx, pts[0].dy)
         ..lineTo(pts[5].dx, pts[5].dy)
@@ -223,6 +210,7 @@ class _HandSkeletonPainter extends CustomPainter {
         ..lineTo(pts[13].dx, pts[13].dy)
         ..lineTo(pts[17].dx, pts[17].dy)
         ..close();
+
       canvas.drawPath(
         palmPath,
         Paint()
@@ -230,32 +218,14 @@ class _HandSkeletonPainter extends CustomPainter {
           ..style = PaintingStyle.fill,
       );
 
-      // Кости
-      for (final c in _HandARScreenState._connections) {
+      for (final c in HandARScreen._connections) {
         canvas.drawLine(pts[c[0]], pts[c[1]], bonePaint);
       }
 
-      // Суставы: белый круг + цветная обводка
       for (final p in pts) {
         canvas.drawCircle(p, 8, jointPaint);
         canvas.drawCircle(p, 8, jointBorderPaint);
       }
-
-      // Подпись L / R возле запястья
-      final wrist = pts[0];
-      final label = isLeft ? 'L' : 'R';
-      final tp = TextPainter(
-        text: TextSpan(
-          text: label,
-          style: TextStyle(
-            color: baseColor,
-            fontSize: 28,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      tp.paint(canvas, wrist + const Offset(-30, -40));
     }
   }
 
