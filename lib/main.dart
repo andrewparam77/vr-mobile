@@ -21,7 +21,7 @@ const List<List<int>> handConnections = [
 // ========== Кнопка внутри окна ==========
 class WindowButton {
   final String label;
-  final Rect area; // относительно левого верхнего угла окна
+  final Rect area;
   final VoidCallback onPressed;
   int highlightFrames;
 
@@ -61,8 +61,10 @@ class VirtualWindow {
   double get screenHeight => height * scale;
 
   bool contains(Offset p) {
-    return p.dx >= x && p.dx <= x + screenWidth &&
-        p.dy >= y && p.dy <= y + screenHeight;
+    return p.dx >= x &&
+        p.dx <= x + screenWidth &&
+        p.dy >= y &&
+        p.dy <= y + screenHeight;
   }
 }
 
@@ -180,6 +182,7 @@ class _HandARScreenState extends State<HandARScreen> {
     _plugin?.processFrame(image, _controller!.description.sensorOrientation);
   }
 
+  // ========== Взаимодействие рукой ==========
   void _handleHandInteraction(List<Hand> hands, Size canvasSize) {
     for (final w in _windows) {
       for (final b in w.buttons) {
@@ -193,6 +196,7 @@ class _HandARScreenState extends State<HandARScreen> {
       return;
     }
 
+    // ---- Двумя руками: масштабирование ----
     if (hands.length >= 2) {
       final p1 = _fingerPos(hands[0], canvasSize);
       final p2 = _fingerPos(hands[1], canvasSize);
@@ -228,6 +232,7 @@ class _HandARScreenState extends State<HandARScreen> {
       }
     }
 
+    // ---- Одной рукой: кнопки и перетаскивание ----
     final hand = hands.first;
     final lm = hand.landmarks;
     const indexTip = 8;
@@ -245,6 +250,7 @@ class _HandARScreenState extends State<HandARScreen> {
 
     if (isPinching) {
       if (_draggedWindow == null) {
+        // Кнопки
         for (int i = _windows.length - 1; i >= 0; i--) {
           final w = _windows[i];
           if (!w.contains(fingerPos)) continue;
@@ -264,6 +270,7 @@ class _HandARScreenState extends State<HandARScreen> {
             }
           }
         }
+        // Перетаскивание окна
         for (int i = _windows.length - 1; i >= 0; i--) {
           final w = _windows[i];
           if (w.contains(fingerPos)) {
@@ -315,38 +322,39 @@ class _HandARScreenState extends State<HandARScreen> {
           final canvasSize = Size(constraints.maxWidth, constraints.maxHeight);
           _handleHandInteraction(_hands, canvasSize);
 
-          return Stack(
-            fit: StackFit.expand,
-            children: [
-              RotatedBox(
-                quarterTurns: quarterTurns,
-                child: CameraPreview(_controller!),
-              ),
-              CustomPaint(
-                painter: _ARSpacePainter(
-                  hands: _hands,
-                  windows: _windows,
-                  imageSize: Size(
-                    _controller!.value.previewSize!.height,
-                    _controller!.value.previewSize!.width,
+          // Поворачиваем весь Stack целиком — превью, painter и видео вместе
+          return RotatedBox(
+            quarterTurns: quarterTurns,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                CameraPreview(_controller!),
+                CustomPaint(
+                  painter: _ARSpacePainter(
+                    hands: _hands,
+                    windows: _windows,
+                    imageSize: Size(
+                      _controller!.value.previewSize!.height,
+                      _controller!.value.previewSize!.width,
+                    ),
+                    isFrontCamera: false,
+                    quarterTurns: 0, // поворот уже сделан через RotatedBox
                   ),
-                  isFrontCamera: false,
-                  quarterTurns: quarterTurns,
                 ),
-              ),
-              ..._windows.where((w) => w.videoUrl != null).map((w) {
-                return Positioned(
-                  left: w.x,
-                  top: w.y,
-                  width: w.screenWidth,
-                  height: w.screenHeight,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(12 * w.scale),
-                    child: _VideoWidget(url: w.videoUrl!),
-                  ),
-                );
-              }),
-            ],
+                ..._windows.where((w) => w.videoUrl != null).map((w) {
+                  return Positioned(
+                    left: w.x,
+                    top: w.y,
+                    width: w.screenWidth,
+                    height: w.screenHeight,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(12 * w.scale),
+                      child: _VideoWidget(url: w.videoUrl!),
+                    ),
+                  );
+                }),
+              ],
+            ),
           );
         },
       ),
@@ -361,6 +369,7 @@ class _HandARScreenState extends State<HandARScreen> {
   }
 }
 
+// ========== Видео-виджет ==========
 class _VideoWidget extends StatefulWidget {
   final String url;
   const _VideoWidget({required this.url});
@@ -404,6 +413,7 @@ class _VideoWidgetState extends State<_VideoWidget> {
   }
 }
 
+// ========== Painter ==========
 class _ARSpacePainter extends CustomPainter {
   final List<Hand> hands;
   final List<VirtualWindow> windows;
@@ -436,6 +446,7 @@ class _ARSpacePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    // ---- Окна ----
     final sorted = List<VirtualWindow>.from(windows)
       ..sort((a, b) => b.z.compareTo(a.z));
 
@@ -553,6 +564,7 @@ class _ARSpacePainter extends CustomPainter {
       );
     }
 
+    // ---- Скелет руки ----
     final bonePaint = Paint()
       ..color = Colors.white
       ..strokeWidth = 5
