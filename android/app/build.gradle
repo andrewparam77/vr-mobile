@@ -1,6 +1,6 @@
 defaultConfig {
     applicationId "com.example.hand_vr"
-    minSdkVersion 24        // ← именно 24
+    minSdkVersion 24
     targetSdkVersion 34
     versionCode flutterVersionCode.toInteger()
     versionName flutterVersionName
