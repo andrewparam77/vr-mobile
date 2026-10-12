@@ -29,6 +29,14 @@ jobs:
       - name: Flutter version
         run: flutter --version
 
+      # ЭТОТ ШАГ УДАЛЯЕТ СТАРУЮ ПАПКУ ANDROID
+      - name: Remove old android folder
+        run: rm -rf android
+
+      # ЭТОТ ШАГ СОЗДАЁТ НОВУЮ ПАПКУ ANDROID С ПРАВИЛЬНЫМ V2 MANIFEST
+      - name: Recreate Android
+        run: flutter create --platforms=android .
+
       - name: Install dependencies
         run: flutter pub get
 
